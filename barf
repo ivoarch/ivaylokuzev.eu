@@ -1,0 +1,110 @@
+#!/bin/sh
+
+# To change domain url and feed settings - without modifying the barf script you can use environment variables in Makefile.
+domain=${_BARF_DOMAIN:-"https://barf.btxx.org"}
+feed_title=${_BARF_FEED_TITLE:-"Barf Feed Title"}
+feed_description=${_BARF_FEED_DESCRIPTION:-"Barf Feed description"}
+feed_author=${_BARF_FEED_AUTHOR:-"Barf Feed author"}
+
+set -eu
+MARKDOWN=multimarkdown
+IFS='	'
+
+# Create tab separated file with filename, title, creation date, last update
+index_tsv() {
+	for f in "$1"/*.md
+	do
+		title=$(sed -n '/^# /{s/# //p; q}' "$f")
+		printf '%s\t%s\t%s\t%s\n' "$f" "${title:="No Title"}"
+	done
+}
+
+index_html() {
+	# Print header
+	title=$(sed -n '/^# /{s/# //p; q}' index.md)
+	sed "s/{{TITLE}}/$title/" header.html
+
+	# Intro text
+	$MARKDOWN index.md
+
+	echo "<ul class=posts>"
+
+	# Posts
+	while read -r f title created; do
+		link=$(echo "$f" | sed -E 's|.*/(.*).md|\1/|')
+		created=$(echo $(head -3 "$f" | tail -1))
+		echo "<li><span>$created</span><a href=\"$link\">$title</a></li>"
+	done < "$1" | sort -r
+
+	echo "</ul>"
+
+	# Print footer after post list
+	cat footer.html
+}
+
+# Generate RSS feed
+rss_xml() {
+	uri=$(sed -rn '/rss.xml/ s/.*href="([^"]*)".*/\1/ p' header.html)
+
+	cat <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+	<channel>
+		<title>$feed_title</title>
+		<link>$domain/rss.xml</link>
+		<description>$feed_description</description>
+		<lastBuildDate>$(date -u +"%a, %d %b %Y %H:%M:%S %z")</lastBuildDate>
+		<pubDate>$(date -u +"%a, %d %b %Y %H:%M:%S %z")</pubDate>
+		<generator>Custom RSS Generator</generator>
+		<ttl>1800</ttl>
+EOF
+
+	while read -r f title created; do
+		content=$($MARKDOWN "$f" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'"'"'/\&#39;/g')
+		post_link=$(echo "$f" | sed -E 's|posts/(.*).md|\1|')
+		basic_date=$(echo $(head -3 "$f" | tail -1))
+		published_date=$(date -d "$basic_date" -u +"%a, %d %b %Y %H:%M:%S %z")
+
+		cat <<EOF
+		<item>
+			<title>$title</title>
+			<description>$content</description>
+			<link>$domain/$post_link</link>
+			<guid isPermaLink="false">$domain/$post_link</guid>
+			<pubDate>$published_date</pubDate>
+		</item>
+EOF
+	done < "$1"
+
+	echo -e "    </channel>\n</rss>"
+}
+
+write_page() {
+	filename=$1
+	directory=$(echo $(basename "$filename" .md))
+	$(mkdir -p build/$directory)
+	target=$(echo "$filename" | sed -r 's|\w+/(.*).md|build/\1/index.html|')
+	created=$(echo $(head -3 "$filename" | tail -1))
+	title=$2
+
+	$MARKDOWN "$filename" | \
+		cat header.html - |\
+		sed "s|{{TITLE}}|$title|" \
+		> "$target" && cat footer.html >> "$target"
+}
+
+rm -rf build && mkdir build
+
+# Blog posts
+index_tsv posts | sort -rt "	" -k 3 > build/posts.tsv
+index_html build/posts.tsv > build/index.html
+rss_xml build/posts.tsv > build/rss.xml
+while read -r f title created; do
+	write_page "$f" "$title" "$created"
+done < build/posts.tsv
+
+# Pages
+index_tsv pages > build/pages.tsv
+while read -r f title created; do
+	write_page "$f" "$title" "$created"
+done < build/pages.tsv
